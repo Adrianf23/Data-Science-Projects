@@ -53,7 +53,7 @@ outbreak.confirmed.plot <-  outbreak.data %>%
   ggtitle("Confirmed Food Borne Illnesses")
 ```
 
-![Confirmed Food Borne Illnesses](/img/confirmed-food-borne-illnesses.png)
+![Confirmed Food Borne Illnesses](../img/confirmed-food-borne-illnesses.png)
 
 
 ```r
@@ -66,7 +66,7 @@ upper.confirmation <- outbreak.data %>%
   head(10)
 ```
 
-![Upper Confirmation](/img/upper-confirmation.PNG)
+![Upper Confirmation](./img/upper-confirmation.PNG)
 
 ```r
 #Top 10 lowest values
@@ -77,7 +77,7 @@ lower.confirmation <- outbreak.data %>%
   dplyr::arrange(n) %>%
   head(10)
 ```
-![Lower Confirmation](/img/lower-confirmation.PNG)
+![Lower Confirmation](../img/lower-confirmation.PNG)
 
 We will examine the top/bottom 10 states with food borne illnesses for brevity sake
 
@@ -91,7 +91,7 @@ top.10.states <- outbreak.data %>%
   head(10)
 ```
 
-![Top 10 States](/img/top-10-state-list.PNG)
+![Top 10 States](../img/top-10-state-list.PNG)
 
 ```r
 bottom.10.states <- outbreak.data %>%
@@ -102,7 +102,7 @@ bottom.10.states <- outbreak.data %>%
   head(10)
 ```
 
-![Bottom 10 States](/img/bottom-10-state-list.PNG)
+![Bottom 10 States](../img/bottom-10-state-list.PNG)
 
 ```r
 top.10.state.plot <-  outbreak.data %>%
@@ -115,7 +115,7 @@ top.10.state.plot <-  outbreak.data %>%
   theme(axis.text.x = element_text(angle = 90, hjust = 1))
 ```
 
-![Top 10 State Plot](/img/top-10-state-plot.png)
+![Top 10 State Plot](../img/top-10-state-plot.png)
 
 ```r
 bottom.10.state.plot <-  outbreak.data %>%
@@ -128,7 +128,7 @@ bottom.10.state.plot <-  outbreak.data %>%
   theme(axis.text.x = element_text(angle = 90, hjust = 1))
 ```
 
-![Bottom 10 State Plot](/img/bottom-10-state-plot.png)
+![Bottom 10 State Plot](../img/bottom-10-state-plot.png)
 
 ```r
 #Food Cloud
@@ -170,7 +170,7 @@ wordcloud(
   colors = brewer.pal(8, "Dark2")
 )
 ```
-![Food Cloud](/img/food-cloud.png)
+![Food Cloud](../img/food-cloud.png)
 
 ### Insights  
 
