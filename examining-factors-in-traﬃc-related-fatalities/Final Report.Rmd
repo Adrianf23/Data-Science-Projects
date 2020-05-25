@@ -1,0 +1,1140 @@
+---
+title: "All Roads Lead to Data: Examining Factors in Traffic-Related Fatalities"
+author: 
+- Michael Pearson
+- Jessica Nguyen
+- Adrian Fletcher
+output:
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+  html_document:
+    code_folding: show
+    highlight: haddock
+    theme: lumen
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+  word_document:
+    toc: yes
+    toc_depth: '4'
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 7, fig.height = 4)
+if(!require("pacman")) install.packages("pacman")
+pacman::p_load(dplyr, ggplot2, magrittr, gridExtra, reshape, rmarkdown, leaps, glmnet, knitr, pROC, reshape2, car, ggrepel, contrast, GGally, caret, e1071, gglasso, bestglm, ranger, randomForest, ROSE, tree, corrplot, xtable, reshape2, hrbrthemes, viridis, patchwork) 
+```
+
+\pagebreak  
+
+# Executive Summary
+
+Traffic accidents are a leading cause of fatalities. The goal of our project is to understand which factors lead to fatalities in order to create recommendations for legislation that can reduce traffic-related deaths. The audience of this project is U.S. state legislators. We used data from the U.S. National Highway Traffic Safety Administration (NHTSA) to determine the leading predictors of fatalities. Our data is from 2016 and consists of a random sample of ~44,000 accidents. We include predictors such as drivers' and vehicles' characteristics, weather conditions, use of safety equipment, and types of roads. 
+
+We build two models: 1) Multiple Logistic Regression with cross-validation and 2) Random Forest. In our original data set, 1.94% of observations consisted of fatalities. To achieve a balanced dataset, we used bootstrapping to oversample the minority class and undersample the majority class. Our final data set has 50% fatalities
+
+Both of our models mostly agreed on what the most important predictors are. Among our most important findings were that the level of lighting is an important predictor of fatalities. In general, lower levels of lighting are associated with a higher probability of fatalities. One potential recommendation is to increase the level of lighting by adding more traffic lights. Another one of our key findings were that high speeds were associated with an increase in the probability of fatalities. One recommendation would be to increase the use of techniques that enforce speed limits (e.g., automated cameras that monitor speed, more patrol officers on the road). Finally, our models also indicated that a fire increases the probability of fatalities. Therefore, we recommend that legislation require every car to carry a fire extinguisher or to manufacture cars that use more fire-retardant materials. However, both of our models performed very well out-of-sample. We expect that the NHTSA also has a model that performs very well. Yet, while we believe that we know very well what predictors contribute to traffic fatalities, fatalities still occur because many predictors are uncontrollable and cannot be acted upon. For example, from our model, precipitation is one of the most important predictors to fatalities but it is impossible for us to control the weather or enact legislation that would prevent people from traveling during bad weather. 
+
+While our model performs well, we still have many limitations. For the sake of parsimony, we excluded pedestrian data, but recognize that this limits our overall findings and suggestions in this research paper. Additionally, we would like to have more data from the NHTSA on cases with fatalities. This would allow us to forego bootstrapping and analyze non-artificial data. Finally, another limitation to our methodology is that by using LASSO, we assume that sparsity exists in the data (and that a few predictors are actually important)
+
+# Background
+
+Traffic related deaths are the leading cause of fatality around the world for those aged 5-29. The World Health Organization estimates that 1.25 million people are killed each year from traffic related incidents with an additional 20-40 million people injured. Specifically for the U.S.^[https://usa.streetsblog.org/2018/12/13/why-the-u-s-trails-the-developed-world-on-traffic-deaths/], they estimate that there are "12.4 deaths per 100,000 people - or about 50% higher than similar nations (in Western Europe, Canada, Australia and Japan)." This is important for state legislators to consider when improving traffic safety laws.
+
+# Data
+
+Our data comes from the (National Highway Traffic Safety Administration) NHTSA for the year 2016. Our data is publicly available online (https://www.nhtsa.gov/crash-data-systems/crash-report-sampling-system-crss). The data consists of 46,511 accidents that have been randomly sampled by NHTSA from 60 areas in the U.S. that are representative of the U.S. population (see map below). This original data set is called `ACCIDENT.csv`. We have merged this data set with select variables from other data sets that are part of the same series and are also available through the NHTSA. We have done extensive data pre-processing (described in more detail below).
+
+
+```{r, echo = F}
+# Load Raw Data File
+ACCIDENT <- read.csv("ACCIDENT.csv")
+```
+
+
+### Response Variable
+
+We have coded our response variable, `fatal` as binary. where,   
+$$fatal =\left\{\begin{array}{ll}
+	1 & \mbox{ if at least one fatality in accident} \\
+	0 & \mbox{ if no fatalities}
+\end{array}\right.$$  
+`fatal` is derived from a variable from the original data set called `MAXSEV_IM`. This variable describes the maximum severity within an accident (ranging from minor injuries to deaths). We coded any accident that `MAXSEV_IM` = 4 (the level representing fatality) as `fatal` = 1.  
+
+We also removed from the original data variables that were too similar or derived from `MAXSEV_IM`. These variables do not add predictive power and can make the regressions we do too unstable. These variables are `NUM_INJ` (represents number of people injuried in an accident) AND `NO_INJ_IM` (the same as `NUM_INJ` but values have been imputed for observations missing this value).  
+
+As mentioned, the creators of this data set have imputed in values that were not reported. Therefore, we also remove `MAX_SEV` which is the unimputed version of `MAXSEV_IM`.
+
+```{r, echo = F}
+# Code the response variable. 0 = no fatality, 1 = fatality
+ACCIDENT$MAXSEV_IM <- as.factor(ACCIDENT$MAXSEV_IM)
+ACCIDENT_response <- ACCIDENT %>% mutate(fatal = ifelse(MAXSEV_IM == "4", "1", "0"))
+ACCIDENT_response$fatal <- as.factor(ACCIDENT_response$fatal)
+# remove original MAXSEV_IM variable
+ACCIDENT_response_clean <- ACCIDENT_response[,-44]
+
+# Remove other variables that are very similar to response variable (harmful event)
+# Remove MAX_SEV which is the same as MAXSEV_IM but with missing values 
+ACCIDENT_response_clean <- ACCIDENT_response_clean[,-19]
+# Remove number of known and estimated injuried (built off of original MAXSEV_IM variable)
+ACCIDENT_response_clean <- ACCIDENT_response_clean[,-c(11, 43)]
+```
+
+
+### Data Pre-Processing and Predictor Variables 
+
+We have done the following things to the original dataset to process it:   
+1. Removed variables for which there was an imputed variable equivalent (`MINUTE`, `YEAR`, `DAY_WEEK`, `HOUR`, `RELJCT1`, `RELJCT2`, `HARM_EV`, `LGT_COND`, `WEATHER`, `ALCOHOL`, `MAN_COLL`, `WEATHER1`, `WEATHER2`) from the `ACCIDENT.csv` data set (our main data set).  
+2. Made the following variables from the `VEHICLE.csv`, `DISTRACT.csv`, `VISION.csv`, and `PERSON.csv` datasets.  
+
+The following are our predictor variables that we created:  
+
+| Variable                   | Description |
+|----------------------------|-------------------------------------------------|
+|`hit_run_indicator`| Indicates whether there was a hit-and-run. It equals 1 if there was a hit-and-run and 0 otherwise. This was derived from the `HITRUN_IM` variable in the `VEHICLE.csv` data set. Since this was an imputed variable, there are no missing data for this variable.   |
+|`max_travel_speed` | Numeric variable representing the speed traveled by the fastest vehicle in the accident. Derived from the `TRAV_SP` variable in the original `VEHICLE.csv` data set representing the speed traveled by each car in the accident. |
+|`rollover_indicator` | Indicates whether there was a car that rolled over. It equals '1' if there was a rollover and '0' otherwise. This was derived from the `ROLLOVER` variable in the `VEHICLE.csv` data set. |
+|`max_deformity` | A categorical variable representing the maximum damage to any vehicle in the accident. It equals '0' if "No Damage", '2' for "Minor Damage", '4' for "Functional Damage", '6' for "Disabling Damage", '8' for "Unreported", and '9' for "Unknown." This variable is derived from the `DEFORMED` variable in the original `VEHICLE.csv` data set which had the same levels but for each individual car. |
+|`speed_related_accident` | Indicates whether this accident was related to speed. It equals 1 if yes and 0 if no. This was derived from the `SPEEDREL` variable in the `VEHICLE.csv` data set. Missing values are indicated as *NA*. |
+|`max_nlanes` | Numeric variable indicating the maximum number of lanes a vehicle in the accident was traveling on just prior to the accident, derived from `VNUM_LAN`in the original `VEHICLE.csv`  data set. |
+|`max_speed_limit` | Numerical variable indicating the maximum speed limit of any road involved in the accident. Derived from the `VSPD_LIM` variable in the original `VEHICLE.csv` data set that is the maximum speed limit on a road for each vehicle in the data set. NOTE: Two vehicles might have been driving on roads with two different speed limits. |
+|`any_wet_road` | Indicator variable of whether there were wet roads during the accident (1 = Yes, 0 = Otherwise), derived from `VSURCOND`in the original`VEHICLE.csv`  dataset. |  
+|`any_gradient`| indicator variable of whether any vehicle was traveling on a road with a gradient during the accident (1 = yes, 0 = otherwise), derived from `VPROFILE` variable in the original  `VEHICLE.csv` dataset. |
+|`any_maneuver` | Indicator variable of whether any vehicle performed a maneuver in the accident (1 = yes, 0 = Otherwise, NA = missing), derived from `P_CRASH3` in `VEHICLE.csv`. |
+|`any_distracted` | Indicator variable of whether any driver involved in the accident was distracted ( 1 = yes, 0 = no), derived from `MDRDSTRD` variable from `DISTRACT.csv`. |
+|`any_vision_obstructed` | Indicator variable of whether any driver involved in the accident had their vision obstructed ( 1 = yes, 0 = no), derived form `MVISOBSC` variable from `VISION.csv`. |
+|`fire_indicator` | Indicates whether there was a fire. It equals 1 if there was a fire and 0 otherwise. This was derived from the `FIRE_EXP` variable in the `VEHICLE.csv` data set. |
+|`rest_mis_indicator` | Indicator variable of whether there was any misuse of restraint systems (1 = yes, 0 = no), derived from the `REST_MIS` variable from the `PERSON.csv` data set |
+|`air_bag_indicator` | Indicator variable of whether an air bag failed to deploy (1 = failed, 0 = successfully deployed), derived from the `AIR_BAG` variable from the `PERSON.csv` data set. |
+|`ejection_indicator` | Indicator variable of whether any person involved in the accident was ejected from their set ( 1 = yes, 0 = no), derived from the `EJECTION` variable from the `PERSON.csv` dataset. |  
+
+```{r data-cleaning-1, results = 'hide', echo = F}
+# Remove variables that are very similar to one another (one is an estimation of another)
+# Remove MINUTE, YEAR DAY_WEEK, HOUR, RELJCT1, RELJCT2, HARM_EV, LGT_COND, WEATHER, ALCOHOL, MAN_COLL) 
+ACCIDENT_response_clean <- ACCIDENT_response_clean[,-c(12:20,24,27)]
+names(ACCIDENT_response_clean)
+nrow(ACCIDENT_response_clean) #46,511 observations
+
+# Add in vehicle dataset
+VEHICLE <- read.csv("VEHICLE.csv")
+VEHICLE$CASENUM <- as.character(VEHICLE$CASENUM)
+VEHICLE$VEH_NO <- as.character(VEHICLE$VEH_NO)
+nrow(VEHICLE) #82,149 observations
+
+# Added a variable for hit and runs
+# Hit and Run Indicator - did a Hit and Run Occur?
+hit_run <- VEHICLE %>% group_by(CASENUM) %>% summarise(hit_run_indicator = max(HITRUN_IM))
+hit_run$hit_run_indicator <- as.factor(hit_run$hit_run_indicator)
+datav1 <- merge(x = ACCIDENT_response_clean, y = hit_run, key = "CASENUM", all.x = TRUE)
+# summary(datav1$hit_run_indicator) # 41,653 non-hit and runs; 4858 hit and runs
+nrow(datav1) #46,511
+
+# TRAVEL_SP - highest travel speed of a car in an accident 
+travel_speed <- VEHICLE %>% group_by(CASENUM) %>% summarise(max_travel_speed = max(TRAV_SP))
+travel_speed_clean <- travel_speed %>% filter(max_travel_speed != 999) %>% filter(max_travel_speed != 998) # remove unknown values
+datav2 <- merge(x = datav1, y = travel_speed_clean, key = "CASENUM", all.x = TRUE)
+nrow(datav2)
+
+# Rollover Indicator -- did any vehicle rollover?
+rollover <- VEHICLE %>% filter(ROLLOVER != 9) # remove unknown values
+rollover_2 <- rollover %>% group_by(CASENUM) %>% summarise(rollover_indicator = max(ROLLOVER))
+rollover_2$rollover_indicator <- as.factor(rollover_2$rollover_indicator)
+datav3 <- merge(x = rollover_2, y = datav2, key = "CASENUM", all.y = TRUE)
+nrow(datav3)
+summary(datav3$rollover_indicator)
+
+# DEFORMED - how deformed was the most deformed vehicle
+VEHICLE$DEFORMED <- as.integer(VEHICLE$DEFORMED)
+deformed <- VEHICLE %>% group_by(CASENUM) %>% summarise(max_deformity = max(DEFORMED))
+deformed$max_deformity <- as.factor(deformed$max_deformity)
+datav4 <- merge(x = deformed, y = datav3, key = "CASENUM", all.y = TRUE)
+summary(datav4$max_deformity)
+nrow(datav4)
+
+# SPEEDREL - was this speed related? 
+speedrel_clean <- VEHICLE %>% filter(SPEEDREL != 9) %>% filter(SPEEDREL != 8)
+speedrel <- speedrel_clean %>% mutate(speed_related = ifelse(SPEEDREL %in% c(2:5), 1, 0)) # if accident is speed related, code as 1; otherwise, code as 0 
+speedrel_max <- speedrel %>% group_by(CASENUM) %>% summarise(speed_related_accident = max(speed_related))
+speedrel_max$speed_related_accident <- as.factor(speedrel_max$speed_related_accident)
+summary(speedrel_max$speed_related_accident)
+datav5 <- merge(x = speedrel_max, y = datav4, key = "CASENUM", all.y = TRUE)
+nrow(datav5)
+
+# VNUM_LAN = total lanes in a roadway
+nlanes_clean <- VEHICLE %>% filter(VNUM_LAN != 8) %>% filter(VNUM_LAN != 9)
+nlanes <- nlanes_clean %>% group_by(CASENUM) %>% summarise(max_nlanes = max(VNUM_LAN))
+summary(nlanes$max_nlanes)
+datav6 <- merge(x = nlanes, y = datav5, key = "CASENUM", all.y = TRUE)
+
+# VSPD_LIM
+speed_limit_clean <- VEHICLE %>% filter(VSPD_LIM != 98) %>% filter(VSPD_LIM != 99) %>% filter(VSPD_LIM != 0)
+speed_limit <- speed_limit_clean %>% group_by(CASENUM) %>% summarise(max_speed_limit = max(VSPD_LIM))
+summary(speed_limit$max_speed_limit)
+datav7 <- merge(x = speed_limit, y = datav6, key = "CASENUM", all.y = TRUE)
+
+# VSURCOND- were the surface conditions wet/sandy/muddy? or dry? for at least one vehicle
+vsurcond_clean <- VEHICLE %>% filter(VSURCOND != 0) %>% filter(VSURCOND != 99) %>% filter(VSURCOND != 98)
+wet_road <- vsurcond_clean %>% mutate(wet_road = ifelse(VSURCOND != 1, 1, 0))
+wet_road_max <- wet_road %>% group_by(CASENUM) %>% summarise(any_wet_road = max(wet_road)) # were there any vehicles on the accident on a wet road
+wet_road_max$any_wet_road <- as.factor(wet_road_max$any_wet_road)
+summary(wet_road_max$any_wet_road)
+datav8 <- merge(x = wet_road_max, y = datav7, key = "CASENUM", all.y = TRUE)
+
+# VPROFILE - was there any gradient on the road for at least one vehicle
+vprofile_clean <- VEHICLE %>% filter(VPROFILE != 0) %>% filter(VPROFILE != 8) %>% filter(VPROFILE != 9)
+gradient <- vprofile_clean %>% mutate(gradient = ifelse(VPROFILE != 1, 1, 0))
+gradient_max <- gradient %>% group_by(CASENUM) %>% summarise(any_gradient = max(gradient))
+gradient_max$any_gradient <- as.factor(gradient_max$any_gradient)
+summary(gradient_max$any_gradient)
+datav9 <- merge(x = gradient_max, y = datav8, key = "CASENUM", all.y = TRUE)
+
+# P_CRASH3. Recoded as 0/1. Was there a maneuver by at least one car?
+p_crash3_clean <- VEHICLE %>% filter(P_CRASH3 != 0 ) %>% filter(P_CRASH3 != 99)
+p_crash3 <- p_crash3_clean %>% mutate(maneuver = ifelse(P_CRASH3 != 1, 1, 0)) # Maneuver = 1 if vehicle did a maneuver
+p_crash3_max <- p_crash3 %>% group_by(CASENUM) %>% summarise(any_maneuver = max(maneuver))
+p_crash3_max$any_maneuver <- as.factor(p_crash3_max$any_maneuver)
+summary(p_crash3_max$any_maneuver)
+datav10 <- merge(x = p_crash3_max, y = datav9, key = "CASENUM", all.y = TRUE)
+
+# DISTRACT - was there a distraction for any driver 
+DISTRACT <- read.csv("DISTRACT.csv")
+distract_clean <- DISTRACT %>% filter(MDRDSTRD != 16) %>% filter(MDRDSTRD != 96) %>% filter(MDRDSTRD != 99)
+distract <- distract_clean %>% mutate(distracted = ifelse(MDRDSTRD !=0, 1, 0)) # distracted = 1 if driver was distracted
+distract_max <- distract %>% group_by(CASENUM) %>% summarise(any_distracted = max(distracted))
+distract_max$any_distracted <- as.factor(distract_max$any_distracted)
+summary(distract_max$any_distracted)
+datav11 <- merge(x = distract_max, y = datav10, key = "CASENUM", all.y = TRUE)
+
+# VISION - was anything obscuring the vision of at least one driver in the accident
+VISION <- read.csv("VISION.csv")
+vision_clean <- VISION %>% filter(MVISOBSC != 95) %>% filter(MVISOBSC != 99)
+vision <- vision_clean %>% mutate(vision_obstructed = ifelse(MVISOBSC != 0, 1, 0)) # vision_obstruced = 1 if there was something obstructing vision
+vision_max <- vision %>% group_by(CASENUM) %>% summarise(any_vision_obstructed = max(vision_obstructed))
+vision_max$any_vision_obstructed <- as.factor(vision_max$any_vision_obstructed)
+summary(vision_max$any_vision_obstructed)
+datav12 <- merge(x = vision_max, y = datav11, key = "CASENUM", all.y = TRUE)
+
+# make fire_exp file with fire_indicator
+# vehicle <- read.csv("Accident Files/VEHICLE.CSV")
+# vehicle$CASENUM <- as.character(vehicle$CASENUM)
+# fire_exp <- vehicle %>% group_by(CASENUM) %>% summarize(fire_indicator = max(FIRE_EXP))
+# fire_exp$fire_indicator <- as.factor(fire_exp$fire_indicator)
+# write.csv(fire_exp, "Accident Files/fire_exp.csv")
+# merge with fire_exp
+fire_exp <- read.csv("fire_exp.csv")
+fire_exp$CASENUM <- as.character(fire_exp$CASENUM)
+fire_exp <- fire_exp[, c("CASENUM", "fire_indicator")]
+datav13 <- merge(x = fire_exp, y = datav12, key = "CASENUM", all.y = TRUE)
+
+
+# make rest_mis_indicator, air_bag_indicator, ejection_indicator
+# person <- read.csv("Accident Files/PERSON.CSV")
+# person$CASENUM <- as.character(person$CASENUM)
+# sum(person$REST_MIS == 8)
+# rest_mis <- person %>% filter(REST_MIS != 8) %>% group_by(CASENUM) %>% summarize(rest_mis_indicator = max(REST_MIS))
+# hist(person$air_bag_not_deployed)
+# person$air_bag_not_deployed
+# for (i in 1: nrow(person)) {
+# if(person[i, "AIR_BAG"] == 0) {person[i, "air_bag_not_deployed"] <- 100}
+# else if(person[i, "AIR_BAG"] %in% c(1:9)) {person[i, "air_bag_not_deployed"] <- 0}
+# else if(person[i, "AIR_BAG"] %in% c(20,28)) {person[i, "air_bag_not_deployed"] <- 1}
+# else {person[i, "air_bag_not_deployed"] <- 100}
+# }
+# air_bag <- person %>% filter(air_bag_not_deployed != 100) %>% group_by(CASENUM) %>% summarize(air_bag_indicator = max(air_bag_not_deployed))
+# hist(person$EJECTION)
+# sum(person$EJECTION ==1)
+# for (i in 1: nrow(person)) {
+# if(person[i, "EJECTION"] %in% c(1:3)) {person[i, "EJECTION"] <- 1}
+# }
+# ejection <- person %>% filter(EJECTION < 7) %>% group_by(CASENUM) %>% summarize(ejection_indicator = max(EJECTION))
+# combined <- merge(rest_mis, air_bag, all = TRUE)
+# combined <- merge(combined, ejection, all = TRUE)
+# write.csv(combined, "Accident Files/person_merge.csv")
+# merge with person_merge
+person_merge <- read.csv("person_merge.csv")
+person_merge$CASENUM <- as.character(person_merge$CASENUM)
+person_merge <- person_merge[ , c("CASENUM", "rest_mis_indicator", "air_bag_indicator", "ejection_indicator")]
+datav14 <- merge(x = person_merge, y = datav13, key = "CASENUM", all.y = TRUE)
+nrow(datav14)
+
+# final data without identifiers and fix data types
+data_final_clean <- datav14 %>% select(-c("CASENUM", "PSU", "PJ", "STRATUM", "PSUSTRAT", "PSU_VAR")) # Remove Case Num
+nrow(data_final_clean)
+data_final_clean$rest_mis_indicator <- as.factor(data_final_clean$rest_mis_indicator)
+data_final_clean$air_bag_indicator <- as.factor(data_final_clean$air_bag_indicator)
+data_final_clean$ejection_indicator <- as.factor(data_final_clean$ejection_indicator)
+data_final_clean$fire_indicator <- as.factor(data_final_clean$fire_indicator)
+data_final_clean <- data_final_clean %>% filter(REL_ROAD != 99) %>% filter(REL_ROAD != 98) # get rid of missing/unreported values so that they are recoded as NA
+data_final_clean$REL_ROAD <- as.factor(data_final_clean$REL_ROAD)
+data_final_clean$WRK_ZONE <- as.factor(data_final_clean$WRK_ZONE)
+data_final_clean$MONTH <- as.factor(data_final_clean$MONTH)
+data_final_clean <- data_final_clean %>% filter(TYP_INT != 99) %>% filter(TYP_INT != 98)
+data_final_clean$TYP_INT <- as.factor(data_final_clean$TYP_INT)
+data_final_clean$SCH_BUS <- as.factor(data_final_clean$SCH_BUS)
+data_final_clean <- data_final_clean %>% filter(INT_HWY != 9)
+data_final_clean$INT_HWY <- as.factor(data_final_clean$INT_HWY)
+data_final_clean <- data_final_clean %>% filter(CF1 != 99)
+data_final_clean <- data_final_clean %>% filter(CF2 != 99)
+data_final_clean <- data_final_clean %>% filter(CF3 != 99)
+data_final_clean$CF1 <- as.factor(data_final_clean$CF1)
+data_final_clean$CF2 <- as.factor(data_final_clean$CF2)
+data_final_clean$CF3 <- as.factor(data_final_clean$CF3)
+data_final_clean$WKDY_IM <- as.factor(data_final_clean$WKDY_IM)
+data_final_clean$HOUR_IM <- as.factor(data_final_clean$HOUR_IM)
+data_final_clean$MINUTE_IM <- as.factor(data_final_clean$MINUTE_IM)
+data_final_clean$EVENT1_IM <- as.factor(data_final_clean$EVENT1_IM)
+data_final_clean$MANCOL_IM <- as.factor(data_final_clean$MANCOL_IM)
+data_final_clean$RELJCT1_IM <- as.factor(data_final_clean$RELJCT1_IM)
+data_final_clean$RELJCT2_IM <- as.factor(data_final_clean$RELJCT2_IM)
+data_final_clean$LGTCON_IM <- as.factor(data_final_clean$LGTCON_IM)
+data_final_clean$WEATHR_IM <- as.factor(data_final_clean$WEATHR_IM)
+data_final_clean$ALCHL_IM <- as.factor(data_final_clean$ALCHL_IM)
+data_final_clean$URBANICITY <- as.factor(data_final_clean$URBANICITY)
+data_final_clean$REGION <- as.factor(data_final_clean$REGION)
+
+typeof(data_final_clean$VE_TOTAL)
+
+# get rid of WEATHER1 and WEATHER2 which WEATHER_IM derives from
+data_final_clean <- data_final_clean %>% select(-c(WEATHER1, WEATHER2))
+
+```
+
+
+### Missing Data
+
+Thankfully, our missing data has mostly been imputed by the creators of this data set. Check the CRSS handbook for this data set on more information about the imputation process. Whatever data was not imputed is a categorical variable. Therefore, for some variables with missing data, there is an additional category called "Other".
+
+### Dealing with Unbalanced Data Set with ROSE
+
+```{r testing response, echo = F, results = 'hide'}
+# summary(ACCIDENT_response_clean$fatal)
+
+PennRed <- "#95001a"
+PennBlue <- "#01256e"
+
+#ACCIDENT_response_clean %>% ggplot(aes(x=factor(fatal))) + geom_bar(stat="count", fill=PennBlue) + theme_minimal() + ggtitle("Distribution of Response Variable before ROSE") + labs(x = "Accidents with Fatalities or Not", y = "Number of Accidents") +  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+In the original data set, we have 903 accidents that include at least one fatality. There are 45,608 observations that do not have fatalities. Having an inbalanced data set (1.94% cases with fatalities) prevent us from having accurate and stable results from our model. To solve this problem, we will bootstrap the observations in the minority class (accidents with fatalities) and add them to our data set. We will also randomly undersample from the majority class. One limitation to this method is that it will yield an inaccurate model if our original data set is not representative of the population. However, we have no reason to believe this as the NHTSA has randomly selected this sample. We will use the package ROSE. After bootstrapping, the minority class represents 50% of the data set.
+
+```{r ROSE, echo = F,  results = 'hide'}
+# Use ROSE to bootstrap minority class
+data_final_ROSE_v2 <- ovun.sample(fatal~., data = data_final_clean, N = 46511, p = 0.5, seed = 1, method = "both")$data
+
+#summary(data_final_ROSE_v2$fatal)
+
+# saveRDS(data_final_ROSE_v2,"data_final_ROSE_category_50_50.rds")
+
+data_check_v2 <- readRDS("data_final_ROSE_category_50_50.rds")
+
+# Plot response variable
+# data_check_v2 %>% ggplot(aes(x=factor(fatal))) + geom_bar(stat="count", fill=PennBlue) + theme_minimal() + ggtitle("Distribution of Response Variable AFTER ROSE") + labs(x = "Accidents with Fatalities or Not", y = "Number of Accidents") +  theme(plot.title = element_text(hjust = 0.5))
+```
+
+# Exploratory Data Analysis for Predictor Variables
+
+## Distributions of Predictor Variables
+
+```{r, echo = F}
+data <- readRDS("data_final_ROSE_category_50_50.rds")
+```
+
+All variables are defaulted to "none" unless otherwise stated. We found a few variables of interest, namely
+
+* `Hit and Runs`  
+* `Region`  
+* `Ejection`   
+* `Number of Lanes`  
+* `Month`  
+
+The rest of our EDA results are in the Appendix.  
+
+#### Hit-and-Runs
+
+Hit and runs returned a surprising result. It appears that most traffic-related fatalities in our data set did not result from hit and runs. On second-thought, it makes sense that if fatalities are involved, people may be less likely to escape the accident and instead try to stay and help those who were severely injured    
+
+#### Region
+
+Concerning region, our data is split into 4 regions:  
+1. Northeast *(PA, NJ, NY, NH, VT, RI, MA, ME, CT)*  
+2. Midwest *(OH, IN, IL, MI, WI, MN, ND, SD, NE, IA, MO, KS)*  
+3. South *(MD, DE, DC, WV, VA, KY, TN, NC, SC, GA, FL, AL, MS, LA, AR, OK, TX)*  
+4. West *(MT, ID, WA, OR, CA, NV, NM, AZ, UT, CO, WY, AK, HI)*  
+
+Region 1 and 4 have the largest proportion of traffic-related accidents. They have about 60-70% traffic related accidents, although we find that the majority of the data comes from region 3. This has to be taken into account with out future data.    
+  
+#### Ejection
+
+
+We find that most of the people that are ejected from their cars (`ejection indicator = 1`) result in fatalities. This makes sense and is unsurprising.  
+
+
+#### Number of Lanes
+
+We originally hypothesized that a large number of lanes might result in higher fatalities because more lanes might mean more traffic and opportunities to get into crashes. Surprisingly, there is large proportion of accidents that occur in 2 lanes. However, the amount of 2-lane roads are likely most common.  
+
+#### Month  
+July is the highest month for fatalities. This could be attributed to the fact that there are more seasonal/outdoor events (e.g., Independence Day) occurring during this time that necessitate more cars on the road..
+
+## Collapsing Categorical Levels
+
+Since we have many categorical variables with a total of more than 200 levels, we can quickly run into the problem of multiplicity (making every predictor appear significant despite should having about 5% false positives with alpha level 0.05). In order to determine which levels to collapse, we ran single decision trees with just the categorical variable vs. the response variable (`fatal`). Here, we just show the tree for the `HOUR_IM` variable. However, we the rest of the trees are in Appendix 2.
+
+#### HOUR_IM
+
+For example, this is our decision tree for the `HOUR_IM` variable which represents what hour of the day the accident occurred. From this decision tree, we grouped observations where accidents occurred in the 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, and 18 hours together into one new variable called `hour_night`. `hour_night` is equal to '0' for these observations because these hours occur during the day time. The other hours (0, 1, 2, 3, 5, 6, 19, 20, 21, 22, 23) occur during the night time and are coded as `hour_night` = 1. 
+```{r collapse variables, echo = F, results = 'hide'}
+traffic2 <- readRDS("data_final_ROSE_category_50_50.rds")
+traffic2 <- traffic2[, c(1:41,43:45)]
+
+data_test <- traffic2
+
+# HOUR_IM variable
+fit0.single <-tree(fatal~HOUR_IM,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+plot(fit0.single)
+text(fit0.single, pretty = 1)
+# summary(traffic2$HOUR_IM)
+
+data_test2 <- data_test %>% mutate(hour_night = ifelse(data_test$HOUR_IM %in% c("0", "1", "2", "3", "5", "6", "19", "20", "21", "22", "23"), 1, 0))
+
+```
+
+#### max_deformity
+
+We collapsed `max_deformity` according to the tree below. `max_deformity_group1` is the new variable which equals 1 if `max_deformity` is '2', '4', '8', or '9'. `max_deformity` is '0' if there is 'no damage', '2' if there is 'minor damage', '4' if ther eis 'functional dmaage', '6' if there is 'disabling damage', '8' if it is 'not reported' and '9' if it us 'unknown'.
+
+```{r collapse variables 2, echo = F, results = 'hide'}
+# fit0.single <-tree(fatal~max_deformity,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+# plot(fit0.single)
+# text(fit0.single, pretty = 1)
+
+# summary(traffic2$max_deformity)
+
+data_test2 <- data_test2 %>% mutate(max_deformity_group1 = ifelse(data_test2$max_deformity %in% c("2", "4", "8", "9"), 1, 0))
+
+```
+
+#### MONTH
+
+Following our tree, we collapsed the `MONTH` variable so that levels 1, 2, 3, 4, 5, 9, 11 were categorized as `month_group1` to 1. Note that these months are the winter months. The other months were set to `month_group1` = 0. 
+
+```{r collapse levels 3, echo = F, results = 'hide'}
+# fit0.single <-tree(fatal~MONTH,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+# plot(fit0.single)
+# text(fit0.single, pretty = 1)
+
+# summary(traffic2$MONTH)
+
+data_test2 <- data_test2 %>% mutate(month_group1 = ifelse(data_test2$MONTH %in% c("1", "2", "3", "4", "5", "9", "11"), 1, 0))
+```
+
+#### TYP_INT
+
+`TYP_INT` is a variable representing the type of intersection that the traffic occurred at. Following our tree, we grouped observations with `TYP_INT`equal to 2, 4, 6, 10 into one category such that `typ_int_group1` = 0. All other observations were assigned `type_int_group1` = 0. 
+
+```{r collapse levels 4, echo = F, results = 'hide'}
+# fit0.single <-tree(fatal~TYP_INT,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+# plot(fit0.single)
+# text(fit0.single, pretty = 1)
+
+# summary(traffic2$TYP_INT)
+
+data_test2 <- data_test2 %>% mutate(typ_int_group1 = ifelse(data_test2$TYP_INT %in% c("2", "4", "6", "10"), 1, 0))
+
+```
+
+#### WRK_ZONE
+
+`WRK_ZONE` is a variable that represents whether the accident occurred in a work zone or not. Additionally, it specifies what type of work zone the accident occurred in. `WRK_ZONE` is 0 for no work zone, 1 for construction, 2 for maintenance, 3 for utility, 4 for unknown workzone. However, our tree indicated that it is a singlenode tree. This means that there is not much variability in this variable. Therefore, we remove it from our data. 
+
+```{r collapse levels 5, eval = F, echo = F}
+# fit0.single <-tree(fatal~WRK_ZONE,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+# plot(fit0.single)
+# text(fit0.single, pretty = 1)
+
+# summary(traffic2$WRK_ZONE)
+```
+
+#### REL_ROAD
+
+`REL_ROAD` is a categorical variable with the following levels (1 = On Roadway, 2 = On Shoulder, 3 = On Median, 4 = On Roadside, 5 = Outside Trafficway, 6 = Off Roadway - Location Unknown, 7 = In Parking Lane/Zone, 8 = Gore, 10 = Separator, 11 = Continuous Left Turn Lane). Following our tree, we set observations with `REL_ROAD` equal to 1, 2, 5, 6, 7, 8, 10 to have `rel_road_group1` equal to 1. The other categories were set `rel_road_group2` equal to 0. 
+
+```{r collapse levels 6, echo = F, results = 'hide'}
+# fit0.single <-tree(fatal~REL_ROAD,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+# plot(fit0.single)
+# text(fit0.single, pretty = 1)
+
+# summary(traffic2$REL_ROAD)
+
+data_test2 <- data_test2 %>% mutate(rel_road_group1 = ifelse(data_test2$REL_ROAD %in% c("1", "2", "5", "6", "7", "8", "10"), 1, 0))
+
+```
+
+#### CF1
+
+`CF1` is a categorical variable representing events that happened during the crash. It equals 0 if none of the following events occurred, 3 if road was experiencing maintenance or construction-created condition, 5 if surface under water, 7 if surface washed out (caved in, road slippage), 13 if aggressive driving/road rage by non-contact vehicle driver, 14 if motor vehicle struck by failing cargo or something that came loose from or something that was set in motion by a vehicle, 15 if non-occupant struck by falling cargo or something came loose from or something that was set in motion by a vehicle, 16 is non-occupant struck vehicle, 17 is vehicle set in motion by non-driver, 19 is recent previous crash scene nearby, 20 is police-pursuit-involved, 21 is within designated school zone, 23 is indication of a stalled/disabled vehicle, 24 is unstabilized situation began and all harmful events occurred off the roadway, 25 is toll booth/plaza related, 26 is backup due to prior non-recurring incident, 27 is backup due to prior crash, 28 is backup due to regulation congestion, and 99 is unknown. 
+
+From our tree, we set observations with CF1 equal to 0, 5 7, 15, 16, 21, 25, 26, 27, 28 as `cf1_group1` as 1 and the other levels as 0. 
+
+```{r collapse levels 7, echo = F, results = 'hide'}
+# fit0.single <-tree(fatal~CF1,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+# plot(fit0.single)
+# text(fit0.single, pretty = 1)
+
+# summary(traffic2$CF1)
+
+data_test2 <- data_test2 %>% mutate(cf1_group1 = ifelse(data_test2$CF1 %in% c("0", "5", "7", "15", "16", "21", "25", "26", "27", "28"), 1, 0))
+```
+
+
+#### CF2 and CF3
+
+These variables have the same definition as for CF1. However, they are the second and third most important events that occur (the first is recorded by CF1). After doing trees, we found that these variables yield single-node trees. This gives us reason to believe that these predictors do not have variability and may not be significant. Therefore, we remove them from our analysis.
+
+```{r collapse levels 8 , eval = F, echo = F}
+# fit0.single <-tree(fatal~CF2,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+# plot(fit0.single)
+# text(fit0.single, pretty = 1)
+
+# summary(traffic2$CF2)
+
+# fit0.single <-tree(fatal~CF3,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+# plot(fit0.single)
+# text(fit0.single, pretty = 1)
+
+# summary(traffic2$CF3)
+```
+
+
+#### WKDY_IM
+
+`WKDY_IM` is a categorical variable with levels 1 - 7. It represents the day of the week that the accident occurred. Sunday is coded as `WKDY_IM` = '1'. Monday is coded as '2' and so on. Our single tree has grouped levels '2', '3', '4', '5', and '6'. These are actually weekdays (Monday through Friday). We have coded this category as `wkdy` = '1'.  
+
+```{r collapse levels 9 , echo = F, results = 'hide'}
+# fit0.single <-tree(fatal~WKDY_IM,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+# plot(fit0.single)
+# text(fit0.single, pretty = 1)
+
+# summary(traffic2$WKDY_IM)
+
+data_test2 <- data_test2 %>% mutate(wkdy = ifelse(data_test2$WKDY_IM %in% c("2", "3", "3", "4", "5", "6"), 1, 0))
+```
+
+
+#### MANCOL_IM
+
+`MANCOL_IM` represents the manner of collision. It is defined as '0' is "Not collision with Motor Vehicle in Transport", '1' is 'Front-to_Rear', 2 is 'Front-to-Front', '6' is "Angle", '7' is "Sideswipe, Same Direction", '8' is "Sideswipe, Opposite Direction", '9' is "Rear-to-Side", '10' is "Rear-to-Rear", '11' is "Other." Our tree has sorted levels '1', '7', '8', '9', '10', and '11' into one group. We will sent this group to have the variable `mancol_group1` = '1'. The other levels will have this variable equal to '0'. 
+
+
+```{r, echo = F, results = 'hide'}
+# fit0.single <-tree(fatal~MANCOL_IM,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+# plot(fit0.single)
+# text(fit0.single, pretty = 1)
+
+# summary(traffic2$MANCOL_IM)
+
+data_test2 <- data_test2 %>% mutate(mancol_group1 = ifelse(data_test2$MANCOL_IM %in% c("1", "7", "8", "9", "10", "11"), 1, 0))
+
+```
+
+
+#### RELJCT2_IM
+
+`RELJCT2_IM` is a variable that describes the type of junction the accident was located on. It is equal to '1' if "Non-Junction", '2' if 'Intersection', '3' if 'Intersection Related' '4' if 'Driveway Access', '5' if 'Entrance/Exit Ramp Related', '6' if 'Railway Grade Crossing', '7' if 'Crossover Related', '8' if "Driveway Access Related", '16' if "Shared_uSe Path Crossing", '17' if "Acceleration/Deceleration Lane", '18' if "Through Roadway", '19' if 'Other Location Within Interchange Area', and '20' if "Entrance/Exit Ramp". Out tree grouped levels '3', '4', '5', '6', '7', '8', '17', '18', '19', and '20' together. We have given these groups `reljct2_group1` = '1'. The other levels had this variable set to '0'.
+
+
+```{r, echo = F, results = 'hide'}
+# fit0.single <-tree(fatal~RELJCT2_IM,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+# plot(fit0.single)
+# text(fit0.single, pretty = 1)
+
+# summary(traffic2$RELJCT2_IM)
+
+data_test2 <- data_test2 %>% mutate(reljct2_group1 = ifelse(data_test2$RELJCT2_IM %in% c("3", "4", "5", "6", "7", "8", "17", "18", "19", "20"), 1, 0))
+
+```
+
+
+#### WEATHR_IM
+
+`WEATHR_IM` describes the type of weather during the accident. It is equal to '0' if 'No Additional Atmospheric Conditions', '1' if "clear", '2' if 'Rain', '3' if 'Sleet or Hail', '4' if 'Snow', '5' if "Fog, Smog, Smoke", '6' if Severe Crosswinds', '7' if 'Blowing Sand, Soil, Dirt, '8' if Other', '10' if 'Cloudy', '11' if 'Blowing Snow', '12' if 'Freezing Rain or Drizzle'. Our tree has grouped levels '2', '3', '4', '5', '8', '11', and '12' together. These are all precipitations. The other level does not include precipitation. We have set the precipitations levels to have `precipitation` = '1'. The other levels have 'precipitation` = '0'.
+
+```{r, echo = F, results = 'hide'}
+# fit0.single <-tree(fatal~WEATHR_IM,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+# plot(fit0.single)
+# text(fit0.single, pretty = 1)
+
+# summary(traffic2$WEATHR_IM)
+
+data_test2 <- data_test2 %>% mutate(precipitation = ifelse(data_test2$WEATHR_IM %in% c("2", "3", "4", "5", "8", "11", "12"), 1, 0))
+
+```
+
+#### LGTCON_IM
+
+`LGTCON_IM` represents the type/level of lighting that was present during the time of the accident. Level '1' is 'Daylight, '2' is Dark-Not Lighted, '3' is 'Dark-Lighted', '4' is 'Dawn', '5' is 'Dusk', '6' is 'Dark-Unknown Lighting', '7' is 'Other', '8' is Not Reported', and '9' is 'Unknown.' Our tree has grouped levels '1', '4', and '6' together. It is unclear why these levels have been grouped together. We have set 'lgtcon_group1` to equal '1' for levels in this group and '0' for all other levels. 
+
+```{r, echo = F, results = 'hide'}
+#fit0.single <-tree(fatal~LGTCON_IM,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+# plot(fit0.single)
+# text(fit0.single, pretty = 1)
+
+# summary(traffic2$LGTCON_IM)
+
+data_test2 <- data_test2 %>% mutate(lgtcon_group1 = ifelse(data_test2$LGTCON_IM %in% c("1", "4", "6"), 1, 0))
+```
+
+#### REGION
+
+`REGION` is a four-level categorical variable. It equals '1' if the crash was in the Northeast U.S. (states of PA, NJ, NY, NJ, VT, RI, MA, ME, and CT). It equals '2' for the Midwest (OH, IN, IL, MI, VI, MN, ND, SD, NE, IA, MO, and KS). It equals '3' for the South (MD, DE, DC, WV, VA, KY, TN, NC, SC, GA, FL, AL, MS, LA, AR, OK, and TX). It equals '4' for the West (MT, ID, WA, OR, CA, NV, NM, AZ, UT, CO, WY, AK, and HI).
+
+Our tree has grouped '1', '3' and '4' together. Therefore we set the variable `midwest` = '1' if `REGION` equals '2' and '0' otherwise.
+
+```{r, echo = F, results = 'hide'}
+# fit0.single <-tree(fatal~REGION,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+# plot(fit0.single)
+# text(fit0.single, pretty = 1)
+
+#summary(traffic2$REGION)
+
+data_test2 <- data_test2 %>% mutate(midwest = ifelse(data_test2$REGION %in% c("2"), 1, 0))
+
+```
+
+
+```{r,echo = F}
+# remove all variables that were collapsed 
+data_test_removed <- data_test2 %>% select(-c(HOUR_IM, max_deformity, MONTH, TYP_INT, WRK_ZONE, REL_ROAD, MINUTE_IM, CF1, CF2, CF3, WKDY_IM, MANCOL_IM, RELJCT2_IM, LGTCON_IM, WEATHR_IM, REGION))
+
+# change the new variables created into factors
+data_test_removed$hour_night <- as.factor(data_test_removed$hour_night)
+data_test_removed$max_deformity_group1 <- as.factor(data_test_removed$max_deformity_group1)
+data_test_removed$month_group1 <- as.factor(data_test_removed$month_group1)
+data_test_removed$typ_int_group1 <- as.factor(data_test_removed$typ_int_group1)
+data_test_removed$rel_road_group1 <- as.factor(data_test_removed$rel_road_group1)
+data_test_removed$cf1_group1 <- as.factor(data_test_removed$cf1_group1)
+data_test_removed$wkdy <- as.factor(data_test_removed$wkdy)
+data_test_removed$mancol_group1 <- as.factor(data_test_removed$mancol_group1)
+data_test_removed$reljct2_group1 <- as.factor(data_test_removed$reljct2_group1)
+data_test_removed$lgtcon_group1 <- as.factor(data_test_removed$lgtcon_group1)
+data_test_removed$precipitation <- as.factor(data_test_removed$precipitation)
+data_test_removed$midwest <- as.factor(data_test_removed$midwest)
+
+data_test_removed2 <- data_test_removed %>% select(-c(EVENT1_IM))
+```
+
+After performing all of our EDA and data-processing, this is a summary of our data.
+```{r, results = 'hold'}
+summary(data_test_removed2)
+```
+
+
+
+# Analysis
+
+We chose to run two models:
+1.  Logistic Regression with LASSO
+2.  Random Forest
+
+We chose to do logistic regression with LASSO because we have many predictor variables and levels of categorical variables. We chose to compare this to a random forest because of the random forest's well-known predictive abilities and computational efficiency. 
+
+## Training and Testing Data
+
+We split our data of ~44,000 observations into a training and testing set. We put 37,208 observations (80%) in the training set. The remaining 9,303 observations (20%) are in the testing set. We train our multiple logistic regression on the training data set
+
+```{r training and testing, echo = F, results = 'hide'}
+n <- nrow(data_test_removed2)
+n1 <- (4/5)*n
+train.index <- sample(n, n1, replace=FALSE)
+# length(train.index)
+data.train <- data_test_removed2[train.index, ]
+data.test <- data_test_removed2[-train.index, ]
+
+nrow(data.train)
+nrow(data.test)
+```
+
+
+## Logistic Regression with LASSO
+
+
+### LASSO
+
+We build the model using 10 fold cross-validation. We chose our model based on which model performed best in terms of minimizing deviance. 
+
+
+```{r LASSO cv, echo = F}
+X <- model.matrix(fatal~., data.train)[,-1] # for each factor: num of levels -1
+Y <- data.train$fatal
+set.seed(10) # to have same sets of K folds
+# fit_removed.cv <- cv.glmnet(X, Y, alpha=1, family="binomial", nfolds = 10, type.measure = "deviance")
+fit_removed.cv <- readRDS("fit_removedcv.rds")
+plot(fit_removed.cv)
+
+#saveRDS(fit_removed.cv, file ="C:/Users/Michael/Documents/STAT 471/Final Project/fit_removedcv.rds")
+```
+
+We will take lambda 1se. There will be about 34 non-zero predictors. The following are the variables that have been chosen by our LASSO.
+
+```{r, echo=FALSE, results = 'hold'}
+coef.1se <- coef(fit_removed.cv, s="lambda.1se")
+coef.1se <- coef.1se[which(coef.1se !=0),]
+rownames(as.matrix(coef.1se))
+```
+
+### Logistic Regression (Relaxed LASSO)
+
+To reduce bias, we take our inputs from LASSO and fit it into a logistic regression (a relaxed LASSO). We include a summary of our results in the Appendix. Here is our ROC curve.
+
+```{r relaxed LASSO, echo = F}
+fit.1se.glm <- glm(fatal~rest_mis_indicator+air_bag_indicator+ejection_indicator+fire_indicator+any_distracted+any_maneuver+any_gradient+any_wet_road+max_speed_limit+speed_related_accident+rollover_indicator+VE_FORMS+PVH_INVL+PEDS+SCH_BUS+INT_HWY+RELJCT1_IM+ALCHL_IM+URBANICITY+hit_run_indicator+max_travel_speed+hour_night+max_deformity_group1+month_group1+typ_int_group1+rel_road_group1+cf1_group1+wkdy+mancol_group1+reljct2_group1+lgtcon_group1+precipitation+midwest, data=data.train, family=binomial(logit))
+# summary(fit.1se.glm)
+
+pred <- predict(fit.1se.glm, data.test)
+
+fit_removed.roc<-roc(data.test$fatal, pred, plot=T, col="blue")
+auc(fit_removed.roc)
+```
+
+
+### Results and Interpretation
+
+Our model indicates that most predictors are statistically significant. The summary of our model is below. We will just discuss a few predictors that are actionable to legislators. 
+
+* **Fire**: Whether a car catches on fire or not is predictive of a fatality. A coefficient of 0.71 indicates that fires that result from crashes are more likely to result in fatalities 
+* **Ejection**: We found that whether or not a passenger was ejected from the vehicle was predictive of a fatality. Its positive estimate indicates that an ejection is more likely to result in a fatality.    
+* **Alcohol Impairment**: We find that accidents that do not involve alcohol impairment are statistically significant. The negative coefficient shows us that there will be a decrease in fatalities when a crash does not involve alcohol.  
+* **Maximum Speed Limit**: The maximum speed limit is a significant variable. Since it is positive, this shows that higher speed limits results in more fatalities   
+* **Lighting**: The amount of lighting has significant predictive power in our data set. Accidents in the dark are more lightly to result in fatalities.  
+* Additionally, we obtain coefficients that are not statistically different from 0. One of these coefficients is `School Bus`. Although the presence of a school bus is shown to be negative in our dataset, we do not have evidence to conclude that school buses are necessarily safer.   
+
+
+## Random Forest
+
+We will now run a random forest using `mtry` = 5 and `ntree` = 500. We will tune our tree and change these tuning parameters later. We run our random forest on the training data set. This is the plot of our initial random forest.  
+
+```{r initial random forest, echo = F}
+fit.rf <- randomForest(fatal~., data.train, mtry=5, ntree=500) # change ntree
+plot(fit.rf, col="red", pch=16, type="p", main="default plot") #
+```
+
+
+### Tuning Model
+
+For our random forest we first tuned `ntree`. To do this we created a random forest with the training dataset with an `mtry` of 5 and an `ntree` of 500 and identified at what level of `ntree` the error leveled off. We determined that the error leveled off where `ntree` equaled 100. Next we tuned `mtry` by creating random forests with the training dataset for each level of `mtry` from 1 to 10 with an `ntree` of 100 and comparing the OOB MSE. Using the elbow rule, we selected an `mtry` of 2. After this we were able to create our final random forest using the training dataset with an `mtry` of 2 and a `ntree` of 100.
+
+```{r tuning random forest, echo = F}
+# rf.error.p <- 1:10
+# for (p in 1:10)
+# {
+#  print(p)
+# fit.rf <- randomForest(fatal~., data.train, mtry=p, ntree=100)
+# rf.error.p[p] <- fit.rf$err.rate[100] # collecting oob mse based on 100 trees
+# }
+# rf.error.p 
+
+# saveRDS(rf.error.p, file ="C:/Users/Michael/Documents/STAT 471/Final Project/rferror.rds")
+
+rf.error.p <- readRDS("rferror.rds")
+
+plot(1:10, rf.error.p, pch=16,
+xlab="mtry",
+ylab="OOB mse of mtry")
+lines(1:10, rf.error.p)
+```
+
+### Results and Interpretation
+
+After tuning the model we get the following results for variable importances. The five most important factors in our random forest were `max_travel_speed`, `max_deformity_group1`, `mancol_group1`, `max_speed_limit`, and `hour_night`. This is in line with our relaxed LASSO results in which all five of these variables are statistically significant.
+
+
+```{r final random forest, echo = F}
+fit.rf.final <- randomForest(fatal~., data.train, mtry = 2, ntree = 100)
+plot(fit.rf.final)
+
+importance <- importance(fit.rf.final)
+rownames(importance(fit.rf.final))
+
+imp <- as.data.frame(importance(fit.rf.final))
+imp <- data.frame(names   = rownames(imp),MeanDecreaseGini = imp$MeanDecreaseGini)
+imp[order(imp$MeanDecreaseGini,decreasing = T),]
+```
+
+The following is the ROC curve for our random forest.
+
+```{r, echo = F}
+predict.rf.y <- predict(fit.rf.final, newdata=data.test)
+predict.rf <- predict(fit.rf.final, newdata=data.test, type="prob")
+rf.test.err <- mean(data.test$fatal != predict.rf.y) 
+# Testing ROC curve
+roc(data.test$fatal, predict.rf[,2], plot=TRUE)
+```
+
+
+## Model Selection and Final Model
+
+To compare out LASSO logistic regression with our random forest, we calculated the AUC on the testing dataset. The AUC for LASSO was 0.9592 and the AUC for our random forest was 0.9995. Therefore, we determined that the random forest was the better model. Both of these models had very high AUCs. We believe this occurred because our predictors have very higher predictive power in predicting fatalities. We do not find this surprising and believe that NHTSA most likely knows what factors contribute to traffic fatalities. The real problem relates to legislation. It is significantly easier to determine the factors that predictive traffic fatalities than it is to create legislation to lower traffic fatalities. It is our goal to provide meaningful recommendations for legislation with the aim of reducing traffic fatalities.
+
+
+# Recommendations and Conclusions
+
+We propose a few policy solutions in order to combat traffic-related incidents. Based on the models that we ran, we propose these solutions concerning:  
+
+* **Fire**: We can pressure car manufacturers to create more fire retardant coverings or protections on their vehicles. If not mandatory, it might be possible to offer a tax incentive to consumers to use fire-retardant protections 
+* **Ejection**: Similar to fire, we can add in protections and stricter seatbelt safety laws
+* **Alcohol Impairment**: While we admit that there are already strict alcohol laws, additional protections can be added to cars such as breathalyzers in order to prevent drunk driving.
+* **Maximum Travel Speed**: We can enforce the maximum speed limit that cars are traveling with harsher laws for speeders
+* **Lighting**: Increase access to more lighting as dark areas tend to have more accidents 
+* **Buses**: Bus safety laws are very important to parents. However, our model shows that buses are not effective in predicting the amount of fatalities. In fact, data from the [NHTSA](https://www.nhtsa.gov/road-safety/school-bus-safety) has shown that buses are one of the safest vehicles on the road due to their size. Since buses are not found to improve our model, we suggest focusing energy on the other factors that we have described. 
+
+
+# Limitations
+
+Our model performs very well but still has many limitations. The first limitation that we excluded data about pedestrians. We did this for the sake of parsimony but we recognize that this limits the scope of our recommendations and suggestions. We excluded data about vehicle passengers for parsimony as well and recognize that this also limits our recommendations. Additionally, we would like to have more data from the NHTSA on cases with fatalities. This would allow us to forego bootstrapping and analyze non-artificial data. Another limitation of our model is that by using LASSO we assume that there is sparsity in the data, meaning that few of the predictors are actually important. 
+
+# Appendix
+
+### EDA graphs
+
+##### Graphs Mentioned in EDA Section
+
+```{r}
+data %>%
+  ggplot(aes(hit_run_indicator, fill=fatal)) +
+  geom_histogram(stat="count") + 
+  ggtitle("Fatalities by Hit and Run") +  
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  labs(x = "Hit-and-Run", y = "Count") +
+  scale_fill_manual(values=c(PennRed, PennBlue))
+
+data %>%
+  ggplot(aes(REGION, fill=fatal)) +
+  geom_histogram(stat="count")+ 
+  ggtitle("Fatalities by Region") +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  labs(x = "Region", y = "Count") +
+  scale_fill_manual(values=c(PennRed, PennBlue))
+
+data %>%
+  ggplot(aes(ejection_indicator, fill=fatal)) +
+  geom_histogram(stat="count") + 
+  ggtitle("Fatalities by Ejection Indicator") +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  labs(x = "Ejected from Vehicle", y = "Count") +
+  scale_fill_manual(values=c(PennRed, PennBlue))
+
+data %>%
+  ggplot(aes(max_nlanes, fill=fatal)) +
+  geom_histogram(stat="count") + 
+  ggtitle("Fatalities by Number of Lanes") +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  labs(x = "Number of Lanes", y = "Count") +
+  scale_fill_manual(values=c(PennRed, PennBlue))
+
+data %>%
+  ggplot(aes(MONTH, fill=fatal)) +
+  geom_histogram(stat="count") + 
+  ggtitle("Fatalities by Month") + 
+    theme(plot.title = element_text(hjust = 0.5)) + 
+  labs(x = "Month", y = "Count") +
+  scale_fill_manual(values=c(PennRed, PennBlue))
+```
+
+##### Other Graphs
+```{r, echo = F}
+data %>%
+  ggplot(aes(rest_mis_indicator, fill=fatal)) + 
+  geom_histogram(stat="count")
+
+data %>%
+  ggplot(aes(fire_indicator, fill=fatal)) +
+  geom_histogram(stat="count") + 
+  ggtitle("Fatalities by Fire")
+
+data %>%
+  ggplot(aes(any_vision_obstructed, fill=fatal)) +
+  geom_histogram(stat="count") + 
+  ggtitle("Fatalities by Obstructured Vision")
+
+data %>%
+  ggplot(aes(any_distracted, fill=fatal)) +
+  geom_histogram(stat="count")
+
+data %>%
+  ggplot(aes(any_maneuver, fill=fatal)) +
+  geom_histogram(stat="count")
+
+data %>%
+  ggplot(aes(any_gradient, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(any_wet_road, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+
+data %>%
+  ggplot(aes(air_bag_indicator, fill=fatal)) +
+  geom_histogram(stat="count") + 
+  ggtitle("Fatalities by Airbag Indicator")
+
+
+
+data %>%
+  ggplot(aes(speed_related_accident, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(max_deformity, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(rollover_indicator, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(VE_TOTAL, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(VE_FORMS, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(PVH_INVL, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(PEDS, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(PERMVIT, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(PERNOTMVIT, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+
+
+data %>%
+  ggplot(aes(TYP_INT, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(WRK_ZONE, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(REL_ROAD, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(SCH_BUS, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(INT_HWY, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(CF1, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+
+
+data %>%
+  ggplot(aes(WKDY_IM, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+
+data %>%
+  ggplot(aes(HOUR_IM, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(MINUTE_IM, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(EVENT1_IM, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(MANCOL_IM, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(RELJCT1_IM, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+
+data %>%
+  ggplot(aes(LGTCON_IM, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(WEATHR_IM, fill=fatal)) +
+  geom_histogram(stat="count")
+
+
+
+data %>%
+  ggplot(aes(URBANICITY, fill=fatal)) +
+  geom_histogram(stat="count")
+```
+
+
+### Single Trees for Collapsin Categorical Levels 
+
+#### max_deformity
+
+```{r max_deformity plot, echo = F}
+fit0.single <-tree(fatal~max_deformity,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+plot(fit0.single)
+text(fit0.single, pretty = 1)
+```
+
+#### MONTH
+
+```{r, month plot, echo = F}
+fit0.single <-tree(fatal~MONTH,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+plot(fit0.single)
+text(fit0.single, pretty = 1)
+```
+
+#### TYP_INT
+
+```{r typ_int plot, echo = F}
+fit0.single <-tree(fatal~TYP_INT,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+plot(fit0.single)
+text(fit0.single, pretty = 1)
+```
+
+#### REL_ROAD
+
+```{r rel_road plot, echo = F}
+fit0.single <-tree(fatal~REL_ROAD,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+plot(fit0.single)
+text(fit0.single, pretty = 1)
+```
+
+#### CF1
+
+```{r cf1_plot, echo = F}
+fit0.single <-tree(fatal~CF1,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+plot(fit0.single)
+text(fit0.single, pretty = 1)
+```
+
+
+#### WKDY_IM
+
+```{r wkdy, echo = F}
+fit0.single <-tree(fatal~WKDY_IM,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+plot(fit0.single)
+text(fit0.single, pretty = 1)
+```
+
+
+#### MANCOL_IM
+
+```{r mancol plot, echo = F}
+fit0.single <-tree(fatal~MANCOL_IM,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+plot(fit0.single)
+text(fit0.single, pretty = 1)
+```
+
+
+#### RELJCT2_IM
+
+```{r reljct2 plot, echo = F}
+fit0.single <-tree(fatal~RELJCT2_IM,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+plot(fit0.single)
+text(fit0.single, pretty = 1)
+```
+
+
+#### WEATHR_IM
+
+```{r weathr plot, echo = F}
+fit0.single <-tree(fatal~WEATHR_IM,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+plot(fit0.single)
+text(fit0.single, pretty = 1)
+```
+
+
+#### LGTCON_IM
+
+```{r lgtcon plot, echo = F}
+fit0.single <-tree(fatal~LGTCON_IM,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+plot(fit0.single)
+text(fit0.single, pretty = 1)
+```
+
+
+#### REGION
+
+```{r region plot, echo = F}
+fit0.single <-tree(fatal~REGION,traffic2,control=tree.control(nobs=nrow(traffic2),minsize=5,mindev=.008))# try different set up to see the fit
+plot(fit0.single)
+text(fit0.single, pretty = 1)
+```
+
+### Relaxed LASSO Output
+
+```{r, echo = F}
+summary(fit.1se.glm)
+```
+

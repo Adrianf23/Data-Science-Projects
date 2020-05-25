@@ -1,0 +1,71 @@
+---
+title: "Data Merge"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 7, fig.height = 4)
+if(!require("pacman")) install.packages("pacman")
+pacman::p_load(dplyr, ggplot2, glmnet, car, data.table, pROC, randomForest, fastDummies) 
+```
+
+
+
+```{r cars}
+vehicle <- read.csv("Accident Files/VEHICLE.CSV")
+vehicle$CASENUM <- as.character(vehicle$CASENUM)
+
+
+fire_exp <- vehicle %>% group_by(CASENUM) %>% summarize(fire_indicator = max(FIRE_EXP))
+fire_exp$fire_indicator <- as.factor(fire_exp$fire_indicator)
+write.csv(fire_exp, "Accident Files/fire_exp.csv")
+```
+
+
+```{r}
+person <- read.csv("Accident Files/PERSON.CSV")
+person$CASENUM <- as.character(person$CASENUM)
+
+sum(person$REST_MIS == 8)
+
+
+rest_mis <- person %>% filter(REST_MIS != 8) %>% group_by(CASENUM) %>% summarize(rest_mis_indicator = max(REST_MIS))
+
+
+
+
+hist(person$air_bag_not_deployed)
+person$air_bag_not_deployed
+
+for (i in 1: nrow(person)) {
+if(person[i, "AIR_BAG"] == 0) {person[i, "air_bag_not_deployed"] <- 100}
+else if(person[i, "AIR_BAG"] %in% c(1:9)) {person[i, "air_bag_not_deployed"] <- 0}
+else if(person[i, "AIR_BAG"] %in% c(20,28)) {person[i, "air_bag_not_deployed"] <- 1}
+else {person[i, "air_bag_not_deployed"] <- 100}
+}
+
+air_bag <- person %>% filter(air_bag_not_deployed != 100) %>% group_by(CASENUM) %>% summarize(air_bag_indicator = max(air_bag_not_deployed))
+
+
+
+
+
+hist(person$EJECTION)
+sum(person$EJECTION ==1)
+
+for (i in 1: nrow(person)) {
+if(person[i, "EJECTION"] %in% c(1:3)) {person[i, "EJECTION"] <- 1}
+}
+
+ejection <- person %>% filter(EJECTION < 7) %>% group_by(CASENUM) %>% summarize(ejection_indicator = max(EJECTION))
+
+combined <- merge(rest_mis, air_bag, all = TRUE)
+combined <- merge(combined, ejection, all = TRUE)
+
+```
+
+
+```{r}
+write.csv(combined, "Accident Files/person_merge.csv")
+```
+
