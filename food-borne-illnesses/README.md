@@ -1,4 +1,4 @@
-# Data Project 2 : Food Borne Illnesses
+# Food Borne Illnesses
 
 
 ## Adrian Fletcher
